@@ -71,14 +71,21 @@ COMP_COLORS = {
     "Digər ödənişlər": "#AB63FA",   # purple
 }
 
-# Group colors for stacked bar charts (tünddən açığa göy)
+# Group colors üçün əsas palet
 GROUP_COLORS = {
     "Head Office": "#002855",  # deep navy
     "IT": "#00509e",           # royal blue
     "Branch": "#7fb3ff",       # light blue
 }
 
-# Department table payment types (ingiliscə – əvvəlki kimi qalsın)
+# 🔸 Group comparison üçün daha zövqlü pastel palet
+GROUP_COLORS_LIGHT = {
+    "Head Office": "#f8dce6",  # light blue
+    "IT": "#ede7ec",           # light red/pink
+    "Branch": "#d3defb",       # light green
+}
+
+# Department table payment types
 DEPT_METRICS = {
     "Total payment": COL_TOTAL,
     "Salary": COL_SALARY,
@@ -91,7 +98,7 @@ DEPT_METRICS = {
     "Remaining other": "Remaining other",  # Digər2 - (project+training+other one-off)
 }
 
-# Çart selectbox-ları üçün ödəniş növləri (AZ)
+# Chart selectbox-ları üçün ödəniş növləri (AZ)
 PAYMENT_OPTIONS = {
     "Bütün ödənişlər": COL_TOTAL,
     "Əmək haqqı": COL_SALARY,
@@ -193,9 +200,6 @@ def add_growth_per_group(df_long: pd.DataFrame,
 
 
 def drop_zero_component(df_long: pd.DataFrame, component_name: str) -> pd.DataFrame:
-    """
-    EOY bütün illərdə 0-dırsa, həmin komponenti ümumiyyətlə qrafikdən çıxar.
-    """
     if df_long.empty or "Component" not in df_long.columns:
         return df_long
     mask = df_long["Component"] == component_name
@@ -212,14 +216,18 @@ def compute_breakdowns(df_scope: pd.DataFrame):
       - komponentlər üzrə illik total,
       - həmin komponentdən faydalanan orta işçilər,
       - adam başına düşən məbləğ.
-    Məzuniyyət ayrıca komponentdir, Digər ödənişlər Digər2-dir.
-    Digər ödənişlər üçün hover-də Layihə/Təlim/Birdəfəlik/Qalan digər breakdown göstərilir.
+
+    Digər ödənişlər üçün:
+      - Layihə/Təlim/Birdəfəlik/Qalan digər sub-komponentlərinin həm məbləği, həm də artım faizi
+        total və per-employee chartları üçün,
+      - eyni sub-komponentlər üzrə əməkdaş sayı və artım faizi employees chartı üçün
+        hover məlumatında göstərilir.
     """
     if df_scope.empty:
         empty = pd.DataFrame(columns=[COL_YEAR, "Component", "value", "growth_pct"])
         return empty.copy(), empty.copy(), empty.copy()
 
-    # İl üzrə komponent məbləğləri
+    # ---- 1) İl üzrə komponent məbləğləri ----
     year_components_amount = (
         df_scope
         .groupby(COL_YEAR, as_index=False)[
@@ -247,14 +255,26 @@ def compute_breakdowns(df_scope: pd.DataFrame):
 
     year_components_amount["other_rest"] = (
         year_components_amount[COL_OTHER2]
-        - (year_components_amount["other_proj"]
-           + year_components_amount["other_train"]
-           + year_components_amount["other_once"])
+        - year_components_amount["other_proj"]
+        - year_components_amount["other_train"]
+        - year_components_amount["other_once"]
     )
 
-    # ---- 1) Komponent total-ları (AZN) ----
+    # İllərə görə sırala və sub-komponentlər üçün growth hesabla
+    year_components_amount = year_components_amount.sort_values(COL_YEAR)
+    for sub in ["other_proj", "other_train", "other_once", "other_rest"]:
+        year_components_amount[f"{sub}_growth"] = (
+            year_components_amount[sub].pct_change() * 100
+        )
+
+    # ---- 1a) Komponent total-ları (AZN) ----
     comp_total_long = year_components_amount.melt(
-        id_vars=[COL_YEAR, "other_proj", "other_train", "other_once", "other_rest"],
+        id_vars=[
+            COL_YEAR,
+            "other_proj", "other_train", "other_once", "other_rest",
+            "other_proj_growth", "other_train_growth",
+            "other_once_growth", "other_rest_growth",
+        ],
         value_vars=list(COMPONENTS.values()),
         var_name="Component_raw",
         value_name="value",
@@ -270,8 +290,7 @@ def compute_breakdowns(df_scope: pd.DataFrame):
     # ---- 2) Komponent üzrə orta əməkdaş sayı ----
     comp_emp_frames = []
     for label, col_name in COMPONENTS.items():
-        tmp_col = col_name
-        tmp = df_scope[df_scope[tmp_col] > 0]
+        tmp = df_scope[df_scope[col_name] > 0]
         if tmp.empty:
             continue
         monthly_emp = (
@@ -299,7 +318,46 @@ def compute_breakdowns(df_scope: pd.DataFrame):
     else:
         comp_emp_long = pd.DataFrame(columns=[COL_YEAR, "Component", "value", "growth_pct"])
 
-    # ---- 3) Adam başına komponent məbləği ----
+    # Sub-komponentlər üzrə əməkdaş sayı (Digər ödənişlər üçün hover-də istifadə olunur)
+    sub_map_emp = {
+        "other_proj": COL_BONUS_PROJECT,
+        "other_train": COL_BONUS_TRAINING,
+        "other_once": COL_BONUS_OTHER,
+        "other_rest": "Remaining other",
+    }
+    sub_emp_year = None
+    for sub_key, sub_col in sub_map_emp.items():
+        if sub_col not in df_scope.columns:
+            continue
+        tmp = df_scope[df_scope[sub_col] > 0]
+        if tmp.empty:
+            continue
+        monthly_emp = (
+            tmp.groupby([COL_YEAR, COL_MONTH])[COL_ID]
+            .nunique()
+            .reset_index(name=f"{sub_key}_emp")
+        )
+        avg_emp = (
+            monthly_emp
+            .groupby(COL_YEAR, as_index=False)[f"{sub_key}_emp"]
+            .mean()
+        )
+        avg_emp = avg_emp.sort_values(COL_YEAR)
+        avg_emp[f"{sub_key}_emp_growth"] = avg_emp[f"{sub_key}_emp"].pct_change() * 100
+        if sub_emp_year is None:
+            sub_emp_year = avg_emp
+        else:
+            sub_emp_year = sub_emp_year.merge(avg_emp, on=COL_YEAR, how="outer")
+
+    if sub_emp_year is not None and not comp_emp_long.empty:
+        comp_emp_long = comp_emp_long.merge(sub_emp_year, on=COL_YEAR, how="left")
+        for sub_key in ["other_proj", "other_train", "other_once", "other_rest"]:
+            if f"{sub_key}_emp" in comp_emp_long.columns:
+                comp_emp_long[sub_key] = comp_emp_long[f"{sub_key}_emp"]
+            if f"{sub_key}_emp_growth" in comp_emp_long.columns:
+                comp_emp_long[f"{sub_key}_growth"] = comp_emp_long[f"{sub_key}_emp_growth"]
+
+    # ---- 3) Per-employee breakdown ----
     monthly_emp_total = (
         df_scope
         .groupby([COL_YEAR, COL_MONTH])[COL_ID]
@@ -314,8 +372,11 @@ def compute_breakdowns(df_scope: pd.DataFrame):
     )
 
     per_emp_breakdown = year_components_amount[
-        [COL_YEAR, COL_SALARY, COL_BONUS, COL_EOY, COL_VACATION, COL_OTHER2,
-         "other_proj", "other_train", "other_once", "other_rest"]
+        [
+            COL_YEAR,
+            COL_SALARY, COL_BONUS, COL_EOY, COL_VACATION, COL_OTHER2,
+            "other_proj", "other_train", "other_once", "other_rest",
+        ]
     ].merge(
         avg_emp_total, on=COL_YEAR, how="left"
     )
@@ -332,8 +393,19 @@ def compute_breakdowns(df_scope: pd.DataFrame):
             per_emp_breakdown[col] / per_emp_breakdown["avg_employees"]
         )
 
+    per_emp_breakdown = per_emp_breakdown.sort_values(COL_YEAR)
+    for sub in ["other_proj", "other_train", "other_once", "other_rest"]:
+        per_emp_breakdown[f"{sub}_growth"] = (
+            per_emp_breakdown[sub].pct_change() * 100
+        )
+
     per_emp_long = per_emp_breakdown.melt(
-        id_vars=[COL_YEAR, "other_proj", "other_train", "other_once", "other_rest"],
+        id_vars=[
+            COL_YEAR,
+            "other_proj", "other_train", "other_once", "other_rest",
+            "other_proj_growth", "other_train_growth",
+            "other_once_growth", "other_rest_growth",
+        ],
         value_vars=list(COMPONENTS.values()),
         var_name="Component_raw",
         value_name="value",
@@ -353,11 +425,12 @@ def create_bar_with_growth(df_year: pd.DataFrame,
                            value_col: str,
                            growth_col: str,
                            title: str):
-    """Üst 3 bar chart (total, avg employees, per employee)."""
     if df_year.empty:
         return None
 
-    df_plot = df_year.copy()
+    df_plot = df_year.sort_values(COL_YEAR).copy()
+    diff_col = f"{value_col}_diff"
+    df_plot[diff_col] = df_plot[value_col].diff()
 
     fig = px.bar(
         df_plot,
@@ -407,25 +480,40 @@ def create_bar_with_growth(df_year: pd.DataFrame,
         margin=dict(l=10, r=30, t=80, b=80),
     )
 
-    # Growth faiz üçün annotasiya
     for _, row in df_plot.iterrows():
         growth = row.get(growth_col)
-        if pd.notna(growth) and np.isfinite(growth):
-            fig.add_annotation(
-                x=row[COL_YEAR],
-                y=row[value_col] / 2,
-                text=fmt_growth(growth),
-                showarrow=False,
-                font=dict(color="white", size=11),
-            )
+        diff = row.get(diff_col)
+
+        if pd.isna(growth) or not np.isfinite(growth):
+            continue
+        if pd.isna(diff) or not np.isfinite(diff):
+            continue
+
+        arrow = "▲" if diff > 0 else "▼" if diff < 0 else ""
+        diff_text = fmt_amount(diff)
+        label = fmt_growth(growth)
+        label += f"<br>{arrow} {diff_text}"
+
+        fig.add_annotation(
+            x=row[COL_YEAR],
+            y=row[value_col] / 2,
+            text=label,
+            showarrow=False,
+            font=dict(color="white", size=11),
+            borderwidth=0,
+            align="center",
+        )
+
     return fig
 
 
-def create_breakdown_line(df_long: pd.DataFrame, title: str):
+def create_breakdown_line(df_long: pd.DataFrame, title: str, unit: str = "AZN"):
     """
     Breakdown line chart with AZ component labels.
-    Hover-da həm məbləğ, həm də artım faizi görünür.
-    Digər ödənişlər üçün əlavə olaraq Layihə/Təlim/Birdəfəlik/Qalan digər breakdown göstərilir.
+    Hover-da:
+      - Bütün komponentlər üçün: dəyər + artım faizi (tam ədəd),
+      - Digər ödənişlər üçün əlavə olaraq Layihə/Təlim/Birdəfəlik/Qalan digər
+        sub-komponentlərinin həm dəyəri, həm də artım faizi göstərilir.
     """
     if df_long.empty:
         return None
@@ -433,22 +521,41 @@ def create_breakdown_line(df_long: pd.DataFrame, title: str):
     df_plot = df_long.copy()
     df_plot["year_str"] = df_plot[COL_YEAR].astype(str)
 
-    # label: məbləğ + growth
+    # Line üzərindəki label – 1 decimal qalır
     def make_label(row):
         g = row.get("growth_pct")
-        if pd.notna(g):
+        if pd.notna(g) and np.isfinite(g):
             return f"{fmt_amount(row['value'])} ({fmt_growth(g)})"
         else:
             return fmt_amount(row["value"])
 
     df_plot["label"] = df_plot.apply(make_label, axis=1)
 
-    # custom_data: [growth_pct, other_proj, other_train, other_once, other_rest]
-    df_plot["growth_pct"] = df_plot.get("growth_pct", np.nan)
-    custom_cols = ["growth_pct"]
-    for extra_col in ["other_proj", "other_train", "other_once", "other_rest"]:
-        if extra_col in df_plot.columns:
-            custom_cols.append(extra_col)
+    # 🔹 Hover üçün faizləri tam ədədə yuvarlaq
+    df_plot["growth_int"] = df_plot["growth_pct"].round().astype("float")
+
+    sub_cols_full = [
+        "other_proj", "other_proj_growth",
+        "other_train", "other_train_growth",
+        "other_once", "other_once_growth",
+        "other_rest", "other_rest_growth",
+    ]
+    has_sub = all(col in df_plot.columns for col in sub_cols_full)
+
+    if has_sub:
+        df_plot["other_proj_growth_int"] = df_plot["other_proj_growth"].round().astype("float")
+        df_plot["other_train_growth_int"] = df_plot["other_train_growth"].round().astype("float")
+        df_plot["other_once_growth_int"] = df_plot["other_once_growth"].round().astype("float")
+        df_plot["other_rest_growth_int"] = df_plot["other_rest_growth"].round().astype("float")
+
+    custom_cols = ["growth_int"]
+    if has_sub:
+        custom_cols += [
+            "other_proj", "other_proj_growth_int",
+            "other_train", "other_train_growth_int",
+            "other_once", "other_once_growth_int",
+            "other_rest", "other_rest_growth_int",
+        ]
 
     fig = px.line(
         df_plot,
@@ -502,28 +609,24 @@ def create_breakdown_line(df_long: pd.DataFrame, title: str):
         ),
     )
 
-    # hovertemplate – artım faizləri də göstərilsin
+    # Hover templates – faizlər tam ədəd
     for trace in fig.data:
         name = trace.name
-        if name == "Digər ödənişlər" and len(custom_cols) >= 5:
-            # customdata[0] = growth_pct
-            # customdata[1..4] = other_proj, other_train, other_once, other_rest
+        if name == "Digər ödənişlər" and has_sub and len(custom_cols) >= 9:
             trace.hovertemplate = (
                 "İl=%{x}<br>"
-                "%{fullData.name}=%{y:,.0f} AZN<br>"
-                "Artım=%{customdata[0]:+.1f}%<br>"
-                "• Layihə bonusu=%{customdata[1]:,.0f} AZN<br>"
-                "• Təlim bonusu=%{customdata[2]:,.0f} AZN<br>"
-                "• Digər birdəfəlik bonus=%{customdata[3]:,.0f} AZN<br>"
-                "• Qalan digər=%{customdata[4]:,.0f} AZN<br>"
+                "%{fullData.name}=%{y:,.0f} " + unit + "<br>"
+                "• Layihə bonusu=%{customdata[1]:,.0f} " + unit + " (%{customdata[2]:+.0f}%)<br>"
+                "• Təlim bonusu=%{customdata[3]:,.0f} " + unit + " (%{customdata[4]:+.0f}%)<br>"
+                "• Digər birdəfəlik bonus=%{customdata[5]:,.0f} " + unit + " (%{customdata[6]:+.0f}%)<br>"
+                "• Qalan digər=%{customdata[7]:,.0f} " + unit + " (%{customdata[8]:+.0f}%)<br>"
                 "<extra></extra>"
             )
         else:
-            # Digər komponentlər üçün yalnız məbləğ + artım
             trace.hovertemplate = (
                 "İl=%{x}<br>"
-                "%{fullData.name}=%{y:,.0f} AZN<br>"
-                "Artım=%{customdata[0]:+.1f}%"
+                "%{fullData.name}=%{y:,.0f} " + unit + "<br>"
+                "Artım=%{customdata[0]:+.0f}%"
                 "<extra></extra>"
             )
 
@@ -532,7 +635,6 @@ def create_breakdown_line(df_long: pd.DataFrame, title: str):
 
 def render_breakdown_row(df_scope: pd.DataFrame,
                          row_title_prefix: str):
-    """Verilən scope üçün sağ-sol 3 breakdown line chart çəkir."""
     comp_total_long, comp_emp_long, per_emp_long = compute_breakdowns(df_scope)
 
     with st.spinner("Loading charts..."):
@@ -542,6 +644,7 @@ def render_breakdown_row(df_scope: pd.DataFrame,
             fig = create_breakdown_line(
                 comp_total_long,
                 title=f"{row_title_prefix} – total payments by component",
+                unit="AZN",
             )
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
@@ -552,6 +655,7 @@ def render_breakdown_row(df_scope: pd.DataFrame,
             fig = create_breakdown_line(
                 comp_emp_long,
                 title=f"{row_title_prefix} – employees receiving each component",
+                unit="employees",
             )
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
@@ -562,6 +666,7 @@ def render_breakdown_row(df_scope: pd.DataFrame,
             fig = create_breakdown_line(
                 per_emp_long,
                 title=f"{row_title_prefix} – per-employee amount by component",
+                unit="AZN",
             )
             if fig:
                 st.plotly_chart(fig, use_container_width=True)
@@ -575,12 +680,6 @@ def build_department_metric_table(
     years: list[int],
     mode: str,
 ) -> pd.DataFrame:
-    """
-    Department & group table üçün cədvəl:
-      - mode="amount"   → ödənilən məbləğ,
-      - mode="avg_emp"  → həmin ödənişdən faydalanan orta əməkdaş sayı,
-      - mode="per_emp"  → adam başına düşən məbləğ.
-    """
     if not metric_keys or not years:
         return pd.DataFrame()
 
@@ -699,11 +798,8 @@ def build_employee_metric_table(
     metric_keys: list[str],
     years: list[int],
     mode: str,
+    avg_monthly: bool = False,
 ) -> pd.DataFrame:
-    """
-    Employee-level table:
-      Group, Department, Employee (S.A.A) səviyyəsində eyni strukturu hesablayır.
-    """
     if not metric_keys or not years:
         return pd.DataFrame()
 
@@ -772,6 +868,22 @@ def build_employee_metric_table(
         if m_df.empty:
             continue
 
+        # Orta aylıq gəlir üçün ay sayına bölək (yalnız amount və per_emp modları)
+        if avg_monthly and mode in ("amount", "per_emp"):
+            active = (
+                df_metric[df_metric[base_col] > 0]
+                .groupby([COL_REGION, COL_DEPT_GROUP, COL_NAME, COL_YEAR])[COL_MONTH]
+                .nunique()
+                .reset_index(name="active_months")
+            )
+            m_df = m_df.merge(
+                active,
+                on=[COL_REGION, COL_DEPT_GROUP, COL_NAME, COL_YEAR],
+                how="left",
+            )
+            m_df["value"] = m_df["value"] / m_df["active_months"].replace(0, np.nan)
+            m_df.drop(columns=["active_months"], inplace=True)
+
         m_df["Metric"] = metric_key
         frames.append(m_df)
 
@@ -818,12 +930,6 @@ def build_employee_metric_table(
 
 
 def compute_group_year_metrics(df_scope: pd.DataFrame, payment_col: str) -> pd.DataFrame:
-    """
-    Group (Head Office / IT / Branch) üzrə:
-      - total (seçilən payment type),
-      - avg_employees (həmin paymenti alan orta işçilər),
-      - per_employee (payment / avg_employees).
-    """
     if df_scope.empty:
         return pd.DataFrame()
 
@@ -873,11 +979,6 @@ def create_clustered_bar_group(metrics_group: pd.DataFrame,
                                value_col: str,
                                growth_col: str,
                                title: str):
-    """
-    Stacked bar: hər il üçün Head Office / IT / Branch üst-üstə yığılır.
-    Hər stack-in içində məbləğ + artım faizi, faiz yeni sətirdə.
-    Legend aşağıda, yazılar horizontal və eyni ölçüdədir.
-    """
     if metrics_group.empty:
         return None
 
@@ -886,7 +987,6 @@ def create_clustered_bar_group(metrics_group: pd.DataFrame,
     def make_label(row):
         g = row.get(growth_col)
         if pd.notna(g) and np.isfinite(g):
-            # Məbləğ və faiz iki sətirdə
             return f"{fmt_amount(row[value_col])}<br>({fmt_growth(g)})"
         else:
             return fmt_amount(row[value_col])
@@ -898,9 +998,9 @@ def create_clustered_bar_group(metrics_group: pd.DataFrame,
         x=COL_YEAR,
         y=value_col,
         color=COL_REGION,
-        barmode="relative",            # stacked
+        barmode="relative",  # stacked
         text="label",
-        color_discrete_map=GROUP_COLORS,
+        color_discrete_map=GROUP_COLORS_LIGHT,
     )
 
     yearly_sum = df_plot.groupby(COL_YEAR)[value_col].sum()
@@ -910,8 +1010,7 @@ def create_clustered_bar_group(metrics_group: pd.DataFrame,
     fig.update_traces(
         textposition="inside",
         insidetextanchor="middle",
-        textfont=dict(size=11, color="white"),
-        textangle=0,
+        textfont=dict(size=11, color="black"),
         cliponaxis=False,
     )
 
@@ -920,13 +1019,12 @@ def create_clustered_bar_group(metrics_group: pd.DataFrame,
         uniformtext_mode="show",
     )
 
-    years_sorted = sorted(df_plot[COL_YEAR].unique())
     fig.update_xaxes(
         title_text="",
         showgrid=False,
         tickmode="array",
-        tickvals=years_sorted,
-        ticktext=[str(int(x)) for x in years_sorted],
+        tickvals=sorted(df_plot[COL_YEAR].unique()),
+        ticktext=[str(y) for y in sorted(df_plot[COL_YEAR].unique())],
     )
     fig.update_yaxes(
         title_text="",
@@ -944,187 +1042,10 @@ def create_clustered_bar_group(metrics_group: pd.DataFrame,
         legend=dict(
             orientation="h",
             yanchor="top",
-            y=-0.25,
+            y=-0.2,
             xanchor="center",
             x=0.5,
         ),
-        margin=dict(l=10, r=30, t=80, b=80),
-    )
-
-    return fig
-
-
-def create_forecast_chart(df_scope: pd.DataFrame, use_first9: bool):
-    """
-    Forecast total payment:
-      - use_first9=True  → first 9 months only, forecast 2026 & 2027 (first 9 months)
-      - use_first9=False → full-year totals, 2025 Q4 estimated using historical Q4/first9 ratio,
-                           forecast 2026 & 2027 (full year)
-
-    Label-lərdə həm məbləğ, həm də əvvəlki ilə görə artım faizi göstərilir.
-    """
-    if df_scope.empty:
-        return None
-
-    d = df_scope.copy()
-    d = d[pd.notna(d[COL_YEAR])]
-    if d.empty:
-        return None
-
-    monthly = (
-        d.groupby([COL_YEAR, COL_MONTH], as_index=False)[COL_TOTAL]
-        .sum()
-        .rename(columns={COL_TOTAL: "total_payment"})
-    )
-    if monthly.empty:
-        return None
-
-    years = sorted(monthly[COL_YEAR].unique())
-    if len(years) < 2:
-        return None
-
-    if use_first9:
-        rows = []
-        first9_months = set(MONTH_ORDER[:9])
-        for y in years:
-            df_y = monthly[monthly[COL_YEAR] == y]
-            first9_total = df_y[df_y[COL_MONTH].isin(first9_months)]["total_payment"].sum()
-            if first9_total > 0:
-                rows.append((y, first9_total))
-        year_df = pd.DataFrame(rows, columns=[COL_YEAR, "total_payment"])
-        if year_df.empty or year_df[COL_YEAR].nunique() < 2:
-            return None
-
-        x = year_df[COL_YEAR].astype(float).values
-        y_vals = year_df["total_payment"].values
-        a, b = np.polyfit(x, y_vals, 1)
-
-        max_year = int(year_df[COL_YEAR].max())
-        forecast_years = np.array([max_year + 1, max_year + 2], dtype=float)
-        forecast_vals = a * forecast_years + b
-
-        hist = year_df.copy()
-        hist["Tip"] = "History"
-
-        fut = pd.DataFrame({
-            COL_YEAR: forecast_years.astype(int),
-            "total_payment": forecast_vals,
-            "Tip": "Forecast",
-        })
-
-        combined = pd.concat([hist, fut], ignore_index=True)
-        title = "Total payment forecast (first 9 months, 2026–2027)"
-    else:
-        rows = []
-        first9_months = set(MONTH_ORDER[:9])
-        q4_months = set(MONTH_ORDER[9:])  # Okt–Dek
-
-        ratios = []
-        for y in years:
-            df_y = monthly[monthly[COL_YEAR] == y]
-            first9_total = df_y[df_y[COL_MONTH].isin(first9_months)]["total_payment"].sum()
-            q4_total = df_y[df_y[COL_MONTH].isin(q4_months)]["total_payment"].sum()
-            if first9_total > 0 and q4_total > 0 and y < 2025:
-                ratios.append(q4_total / first9_total)
-
-        q4_factor = np.mean(ratios) if ratios else 3 / 9
-
-        for y in years:
-            df_y = monthly[monthly[COL_YEAR] == y]
-            if y == 2025:
-                first9_total = df_y[df_y[COL_MONTH].isin(first9_months)]["total_payment"].sum()
-                est_q4 = first9_total * q4_factor
-                annual_total = first9_total + est_q4
-            else:
-                annual_total = df_y["total_payment"].sum()
-            if annual_total > 0:
-                rows.append((y, annual_total))
-
-        year_df = pd.DataFrame(rows, columns=[COL_YEAR, "total_payment"])
-        if year_df.empty or year_df[COL_YEAR].nunique() < 2:
-            return None
-
-        x = year_df[COL_YEAR].astype(float).values
-        y_vals = year_df["total_payment"].values
-        a, b = np.polyfit(x, y_vals, 1)
-
-        max_year = int(year_df[COL_YEAR].max())
-        forecast_years = np.array([max_year + 1, max_year + 2], dtype=float)
-        forecast_vals = a * forecast_years + b
-
-        hist = year_df.copy()
-        hist["Tip"] = "History"
-
-        fut = pd.DataFrame({
-            COL_YEAR: forecast_years.astype(int),
-            "total_payment": forecast_vals,
-            "Tip": "Forecast",
-        })
-
-        combined = pd.concat([hist, fut], ignore_index=True)
-        title = "Total payment forecast (full year, 2026–2027)"
-
-    # Artım faizləri
-    combined = combined.sort_values(COL_YEAR)
-    combined["growth_pct"] = combined["total_payment"].pct_change() * 100
-
-    def make_label(row):
-        g = row.get("growth_pct")
-        if pd.notna(g) and np.isfinite(g):
-            return f"{fmt_amount(row['total_payment'])} ({fmt_growth(g)})"
-        else:
-            return fmt_amount(row["total_payment"])
-
-    combined["label"] = combined.apply(make_label, axis=1)
-
-    fig = px.line(
-        combined,
-        x=COL_YEAR,
-        y="total_payment",
-        color="Tip",
-        markers=True,
-        text="label",
-        category_orders={COL_YEAR: sorted(combined[COL_YEAR].unique())},
-    )
-    max_val = combined["total_payment"].max()
-    min_val = min(0, combined["total_payment"].min())
-
-    fig.update_traces(
-        textposition="top center",
-        textfont=dict(size=12, color="black"),
-        cliponaxis=False,
-    )
-
-    for trace in fig.data:
-        if trace.name == "Forecast":
-            trace.line = dict(dash="dash", width=3)
-        else:
-            trace.line = dict(width=3)
-
-    fig.update_xaxes(
-        title_text="Year",
-        showgrid=False,
-        tickmode="array",
-        tickvals=sorted(combined[COL_YEAR].unique()),
-        ticktext=[str(int(v)) for v in sorted(combined[COL_YEAR].unique())],
-    )
-    fig.update_yaxes(
-        title_text="",
-        showgrid=False,
-        showticklabels=False,
-        range=[min_val, max_val * 1.3 if max_val > 0 else 1],
-    )
-
-    fig.update_layout(
-        title=dict(
-            text=title,
-            x=0.0,
-            xanchor="left",
-        ),
-        title_font=dict(size=14),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        legend_title_text="",
         margin=dict(l=10, r=30, t=80, b=80),
     )
 
@@ -1190,7 +1111,7 @@ selected_positions = st.sidebar.multiselect(
     default=all_positions,
 )
 
-# İl / ay / departament / kurasiya / vəzifə filtrləri
+# Filtrlər
 base_filtered = df.copy()
 if selected_years:
     base_filtered = base_filtered[base_filtered[COL_YEAR].isin(selected_years)]
@@ -1213,7 +1134,6 @@ if selected_curators:
 if selected_positions:
     base_filtered = base_filtered[base_filtered[COL_POSITION_GROUP].isin(selected_positions)]
 
-# Group filter yalnız bəzi chartlara təsir edir
 filtered = base_filtered.copy()
 if selected_regions:
     filtered = filtered[filtered[COL_REGION].isin(selected_regions)]
@@ -1223,7 +1143,7 @@ if filtered.empty:
     st.stop()
 
 # =========================================================
-# 6. KEY METRICS BY YEAR (SEÇİLƏN PAYMENT TYPE ÜZRƏ)
+# 6. KEY METRICS BY YEAR
 # =========================================================
 st.subheader("Key metrics by year")
 
@@ -1309,10 +1229,11 @@ with st.spinner("Loading charts..."):
             st.info("No data for this chart with current filters.")
 
 st.markdown(
-    "_Qeyd: Bu blokda yuxarıdakı selectbox-da seçilən ödəniş növü üzrə illərə görə üç əsas göstərici təqdim olunur: "
-    "illik ümumi məbləğ, həmin ödənişi alan orta aylıq əməkdaş sayı və bir əməkdaşa düşən orta məbləğ. "
-    "Hər sütunun içində əvvəlki ilə nisbətən artım/faiz dəyişikliyi ayrıca qeyd olunub. İl, ay, departament, "
-    "filial kurasiyası və vəzifə filtrinə uyğun olaraq bütün hesablamalar dinamik yenilənir._"
+    "_Bu blok seçdiyiniz payment növü üzrə illər boyu üç əsas göstəricini göstərir: "
+    "solda illik ümumi məbləğ, ortada həmin paymenti alan orta aylıq əməkdaş sayı, sağda isə bir əməkdaşa "
+    "düşən orta məbləğ. Sütunun üstündə həmin ilin məbləği, sütunun içində isə əvvəlki ilə nisbətən artım/faiz "
+    "və məbləğ fərqi görünür. Filtrlərlə (il, ay, group, departament, filial kurasiyası, vəzifə) işləyərək "
+    "konkret seqment üzrə trendi ayrıca təhlil etmək mümkündür._"
 )
 
 # =========================================================
@@ -1323,17 +1244,18 @@ st.subheader("Breakdown by components (all groups)")
 render_breakdown_row(filtered, "Ümumi")
 
 st.markdown(
-    "_Qeyd: Bu sətirdə seçdiyiniz filtrə uyğun olaraq bütün qruplar üzrə (Head Office, IT, Branch birlikdə) "
-    "komponentlərin illik strukturu göstərilir. Birinci qrafikdə hər komponent üzrə ümumi məbləğ, ikinci qrafikdə "
-    "həmin komponentdən aylıq faydalanan əməkdaşların orta sayı, üçüncü qrafikdə isə bir əməkdaşa düşən orta məbləğ "
-    "əks olunur. Məzuniyyət ayrıca xətt kimi göstərilir, Digər ödənişlər xəttinin hover hissəsində isə Layihə, Təlim, "
-    "Birdəfəlik bonus və Qalan digər hissələri ayrıca breakdown şəklində görünür. Hər nöqtənin yanında və hover-də "
-    "məbəğlə yanaşı, əvvəlki ilə nisbətən artım/faiz dəyişikliyi də qeyd olunur. EOY yalnız faktiki ödəniş olduqda "
-    "qrafikə daxil edilir; seçilmiş periodda EOY 0-dırsa, əlavə sətir tutmaması üçün göstərilmir._"
+    "_Bu sətirdə bütün group-lar (Head Office, IT, Branch birlikdə) üzrə Total payment müxtəlif komponentlərə "
+    "bölünərək göstərilir. Soldakı qrafikdə hər komponent üzrə illik ümumi məbləğ, ortadakı qrafikdə həmin komponentdən "
+    "aylıq faydalanan əməkdaşların orta sayı, sağdakı qrafikdə isə bir əməkdaşa düşən orta məbləğ görünür. "
+    "Məzuniyyət ayrıca xətt kimi çıxarılıb, Digər ödənişlər xəttinə hover edəndə isə Layihə bonusu, Təlim bonusu, "
+    "Birdəfəlik digər bonus və Qalan digər hissələri həm məbləğ, həm də əvvəlki ilə nisbətən artım faizi ilə birlikdə "
+    "ayrıca göstərilir. Hər nöqtənin label və hover hissəsində komponent üzrə artım/faiz dəyişikliyi də görünür. "
+    "EOY yalnız faktiki ödəniş olduğu illərdə xəttə əlavə edilir; seçilmiş periodda 0 olduqda qrafikdə yer tutmaması "
+    "üçün gizlədilir._"
 )
 
 # =========================================================
-# 8. GROUP COMPARISON – STACKED (SEÇİLƏN PAYMENT TYPE ÜZRƏ)
+# 8. GROUP COMPARISON – STACKED COLUMN
 # =========================================================
 st.subheader("Group comparison – total, employees, per-employee")
 
@@ -1387,12 +1309,12 @@ with st.spinner("Loading charts..."):
             st.info("No data for this chart with current filters.")
 
 st.markdown(
-    "_Qeyd: Bu blok Head Office, IT və Branch qrupları üzrə seçdiyiniz ödəniş növünün illər boyu dinamikasını "
-    "müqayisə edir. Hər sətirdə müvafiq olaraq ümumi məbləğ, həmin ödənişi alan orta aylıq əməkdaş sayı və "
-    "adam başına düşən orta məbləğ stacked sütunlar formasında göstərilir. Sütunlar tünddən açığa doğru göy çalarları ilə "
-    "qruplara bölünür, hər stack-in içində isə məbləğ və əvvəlki ilə nisbətən artım/faiz dəyişikliyi iki sətirdə oxunaqlı "
-    "şəkildə qeyd olunub. Bu blokda Group filteri istifadə olunmur, çünki məqsəd üç qrupun bir-biri ilə "
-    "tam müqayisəsini qorumaqdır; digər filterlər (il, ay, departament və s.) isə tətbiq edilir._"
+    "_Bu blokda Head Office, IT və Branch qrupları üzərində seçilmiş payment növü üzrə illik göstəricilər "
+    "stacked column qrafiklərlə müqayisə olunur. Solda ümumi məbləğ, ortada həmin paymenti alan orta "
+    "aylıq əməkdaş sayı, sağda isə bir əməkdaşa düşən orta məbləğ göstərilir. Hər ilin sütununda 3 group pastel "
+    "rəng çalarlarında yığılmış şəkildə görünür, stack-lərin içində isə həmin group üzrə məbləğ və əvvəlki ilə "
+    "nisbətən artım/faiz dəyəri iki sətirdə göstərilir. Bu blokda Group filteri deaktivdir (bütün group-lar "
+    "mütləq göstərilir), lakin il, ay, departament, curator və vəzifə filterləri tətbiq olunur._"
 )
 
 # =========================================================
@@ -1424,6 +1346,7 @@ with st.spinner("Loading charts..."):
                 fig = create_breakdown_line(
                     df_long,
                     title=f"{region} – total payments by component",
+                    unit="AZN",
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -1439,6 +1362,7 @@ with st.spinner("Loading charts..."):
                 fig = create_breakdown_line(
                     df_long,
                     title=f"{region} – employees receiving components",
+                    unit="employees",
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
@@ -1454,15 +1378,16 @@ with st.spinner("Loading charts..."):
                 fig = create_breakdown_line(
                     df_long,
                     title=f"{region} – per-employee amount by component",
+                    unit="AZN",
                 )
                 st.plotly_chart(fig, use_container_width=True)
 
 st.markdown(
-    "_Qeyd: Bu blokda hər bir group (Head Office, IT, Branch) üçün komponentlər üzrə illik struktur ayrıca göstərilir. "
-    "Sətirlər ardıcıllıqla (1) ümumi məbləğ, (2) həmin komponentdən faydalanan əməkdaş sayı, (3) adam başına düşən "
-    "məbləğ üzrə qurulub və üç group yan-yana yerləşdirilib ki, vizual müqayisə daha rahat olsun. Məzuniyyət burada da "
-    "ayrı xətt kimi görünür, Digər ödənişlər xəttində hover zamanı Layihə/Təlim/Birdəfəlik/Qalan digər hissələri "
-    "detallı şəkildə göstərilir. Hər nöqtə üçün həm məbləğ, həm də illik artım/faiz dəyişikliyi qeyd olunur._"
+    "_Bu bölmə Breakdown by components məntiqini hər group üçün ayrıca göstərir: Head Office, IT və Branch "
+    "sətir üzrə eyni struktura malik qrafiklərlə yanaşı yerləşdirilib. İlk sətirdə hər group üçün komponentlər üzrə "
+    "ümumi məbləğ, ikinci sətirdə həmin komponentdən faydalanan əməkdaş sayı, üçüncü sətirdə isə bir əməkdaşa düşən "
+    "orta məbləğ göstərilir. Hover zamanı Digər ödənişlər üzrə Layihə/Təlim/Birdəfəlik/Qalan digər hissələrinin "
+    "də həm dəyər, həm də artım faizi ayrıca göstərilir._"
 )
 
 # =========================================================
@@ -1525,7 +1450,6 @@ dept_table = build_department_metric_table(df_table_base, table_metric_keys, tab
 if dept_table.empty:
     st.info("No data for the selected department table filters.")
 else:
-    # Region -> Group, Group Departament -> Department
     dept_table_display = dept_table.rename(columns={COL_REGION: "Group", COL_DEPT_GROUP: "Department"})
 
     amount_cols = [c for c in dept_table_display.columns if "(" in c and ")" in c and "growth %" not in c]
@@ -1566,11 +1490,11 @@ else:
         st.dataframe(styled, use_container_width=True)
 
 st.markdown(
-    "_Qeyd: Bu cədvəldə Group (Head Office / IT / Branch) və Department səviyyəsində seçdiyiniz ödəniş növləri üçün "
-    "illər üzrə ya ümumi məbləğ, ya həmin ödənişi alan orta aylıq əməkdaş sayı, ya da bir əməkdaşa düşən orta məbləğ "
-    "göstərilir. Hər il üçün uyğun artım/faiz dəyişikliyi ayrıca sütunda verilib; mənfi artımlar tünd yaşıl, müsbət "
-    "artımlar isə tünd qırmızı rənglə vurğulanır. Cədvəli istənilən sütuna görə sort edərək yüksək artım və ya azalma "
-    "olan departamentləri asanlıqla tapmaq mümkündür; yuxarıdakı filterlər yalnız bu blok üçün tətbiq olunur._"
+    "_Bu cədvəldə Group (Head Office / IT / Branch) və Department səviyyəsində seçdiyiniz payment növləri üzrə "
+    "illər boyu üç ölçüdən birini görə bilərsiniz: Total amount paid, Average employees paid və Amount per employee. "
+    "Hər il üçün artım/faiz ayrıca sütunda verilir; mənfi göstəricilər tünd yaşıl, müsbət göstəricilər tünd qırmızı "
+    "rənglə vurğulanır. Cədvəli sort edib hansı departamentlərin daha sürətli artdığını və ya azaldığını rahat görə "
+    "bilərsiniz. Bu filterlər yalnız department-level cədvələ aiddir._"
 )
 
 # =========================================================
@@ -1578,7 +1502,6 @@ st.markdown(
 # =========================================================
 st.subheader("Employee-level table")
 
-# Eyni df_table_base, metric_keys, years, mode istifadə olunur
 emp_dept_options = sorted(df_table_base[COL_DEPT_GROUP].dropna().unique())
 emp_selected_depts = st.multiselect(
     "Departments (for employee table)",
@@ -1586,11 +1509,22 @@ emp_selected_depts = st.multiselect(
     default=emp_dept_options,
 )
 
+emp_avg_monthly = st.checkbox(
+    "Show average monthly income (employee table)",
+    value=True,
+)
+
 df_emp_scope = df_table_base.copy()
 if emp_selected_depts:
     df_emp_scope = df_emp_scope[df_emp_scope[COL_DEPT_GROUP].isin(emp_selected_depts)]
 
-emp_table = build_employee_metric_table(df_emp_scope, table_metric_keys, table_selected_years, table_mode)
+emp_table = build_employee_metric_table(
+    df_emp_scope,
+    table_metric_keys,
+    table_selected_years,
+    table_mode,
+    avg_monthly=emp_avg_monthly,
+)
 
 if emp_table.empty:
     st.info("No data for the selected employee-level table filters.")
@@ -1641,11 +1575,12 @@ else:
         st.dataframe(styled_emp, use_container_width=True)
 
 st.markdown(
-    "_Qeyd: Bu cədvəl daha dərin analiz üçün eyni strukturu əməkdaş səviyyəsinə qədər endirir. Hər sətrdə Group, "
-    "Department və Employee (S.A.A) göstərilir və yuxarıdakı payment növləri və ölçü seçimlərinə uyğun olaraq "
-    "illər üzrə ödəniş məbləği, həmin ödənişi alan orta aylıq əməkdaş sayı və ya adam başına düşən məbləğ əks olunur. "
-    "Departament filteri yalnız bu cədvələ aiddir; bununla, misal üçün, konkret bir departament daxilində əməkdaşları "
-    "illər üzrə artım faizlərinə görə sort edərək ən çox artan və ya azalan şəxsləri müəyyənləşdirmək mümkündür._"
+    "_Bu cədvəl eyni metrikləri əməkdaş səviyyəsində göstərir. Hər sətrdə Group, Department və Employee (S.A.A) "
+    "görünür. Yuxarıdakı payment növləri və ölçü (total amount, average employees, amount per employee) seçiminə "
+    "uyğun olaraq illər üzrə dəyərlər və artım faizləri hesablanır. "
+    "\"Show average monthly income\" aktivdirsə, amount və per-employee rejimlərində hər il üçün cəmi həmin "
+    "əməkdaşın həmin il aktiv olduğu ayların sayına bölünür və beləliklə fərqli müddətlərdə çalışan əməkdaşlar "
+    "orta aylıq gəlir əsasında müqayisə edilir._"
 )
 
 # =========================================================
@@ -1673,12 +1608,30 @@ monthly_series = (
     .sum()
 )
 
-# Month order üçün category
 monthly_series[COL_MONTH] = pd.Categorical(
     monthly_series[COL_MONTH],
     categories=MONTH_ORDER,
     ordered=True,
 )
+
+monthly_series = monthly_series.sort_values([COL_MONTH, COL_YEAR])
+
+monthly_series["growth_pct"] = (
+    monthly_series
+    .groupby(COL_MONTH)["metric_value"]
+    .pct_change() * 100
+)
+# Hover üçün tam ədəd
+monthly_series["growth_int"] = monthly_series["growth_pct"].round().astype("float")
+
+def make_monthly_label(row):
+    g = row.get("growth_pct")
+    if pd.notna(g) and np.isfinite(g):
+        return f"{fmt_amount(row['metric_value'])}<br>({fmt_growth(g)})"
+    else:
+        return fmt_amount(row["metric_value"])
+
+monthly_series["label"] = monthly_series.apply(make_monthly_label, axis=1)
 
 with st.spinner("Loading monthly dynamics..."):
     if monthly_series.empty:
@@ -1690,16 +1643,22 @@ with st.spinner("Loading monthly dynamics..."):
             y="metric_value",
             color=COL_YEAR,
             markers=True,
+            text="label",
             category_orders={COL_MONTH: MONTH_ORDER},
+            custom_data=["growth_int"],
         )
         fig_m.update_traces(
+            line=dict(width=3),
+            textposition="top center",
+            textfont=dict(size=11, color="black"),
+            cliponaxis=False,
             hovertemplate=(
-                "İl=%{fullData.name}<br>"
-                "Ay=%{x}<br>"
-                "Məbləğ=%{y:,.0f} AZN"
+                "Year=%{fullData.name}<br>"
+                "Month=%{x}<br>"
+                "Amount=%{y:,.0f} AZN<br>"
+                "Growth=%{customdata[0]:+.0f}%"
                 "<extra></extra>"
             ),
-            line=dict(width=3),
         )
         max_val = monthly_series["metric_value"].max()
         min_val = min(0, monthly_series["metric_value"].min())
@@ -1728,46 +1687,47 @@ with st.spinner("Loading monthly dynamics..."):
         st.plotly_chart(fig_m, use_container_width=True)
 
 st.markdown(
-    "_Qeyd: Bu qrafik seçdiyiniz payment növü üzrə seçilmiş illər və ümumi filterlər (group, departament, filial, "
-    "vəzifə və s.) çərçivəsində aylıq dinamikaları göstərir. X oxunda aylar (Yanvar–Dekabr), rənglərlə isə illər "
-    "fərqləndirilir. Bu sayədə, məsələn, 2023 və 2024-cü illərin eyni aylarında ödəniş səviyyələrini birbaşa "
-    "müqayisə etmək və mövsümi dəyişiklikləri izləmək olur._"
+    "_Bu qrafik seçilmiş payment növü üzrə illər və filtrlər çərçivəsində aylıq dinamikaları göstərir. Hər nöqtənin "
+    "üstündə həmin ay üzrə məbləğ, mötərizədə isə eyni ayın əvvəlki ilə nisbətən artım/faiz dəyişikliyi verilir. "
+    "Hover hissəsində growth dəyərləri tam faizlərlə (məsələn, +12%) göstərilir. X oxunda Yanvar–Dekabr ardıcıllığında "
+    "aylar, rənglərlə isə illər fərqləndirilir._"
 )
 
 # =========================================================
-# 13. FORECAST – BOTTOM
+# 13. CARI SUPER GROSS BY YEAR
 # =========================================================
-st.subheader("Forecast – total payments")
+st.subheader("Cari Super Gross by year")
 
-forecast_use_first9 = st.checkbox(
-    "Use only first 9 months for forecast (do not estimate Q4 for 2025)",
-    value=False,
-)
+csg_df = base_filtered.copy()
 
-# Forecast üçün year filter-dən asılı olmayan scope (amma digər filterlər tətbiq olunur)
-forecast_filtered = df.copy()
-if selected_regions:
-    forecast_filtered = forecast_filtered[forecast_filtered[COL_REGION].isin(selected_regions)]
-if selected_depts:
-    forecast_filtered = forecast_filtered[forecast_filtered[COL_DEPT_GROUP].isin(selected_depts)]
-if selected_curators:
-    forecast_filtered = forecast_filtered[forecast_filtered["Kurasiya_filial_filter"].isin(selected_curators)]
-if selected_positions:
-    forecast_filtered = forecast_filtered[forecast_filtered[COL_POSITION_GROUP].isin(selected_positions)]
+if COL_CURR_SUPER_GROSS not in csg_df.columns:
+    st.info("Cari Super Gross column not found in data.")
+else:
+    csg_year = (
+        csg_df
+        .groupby(COL_YEAR, as_index=False)[COL_CURR_SUPER_GROSS]
+        .sum()
+        .rename(columns={COL_CURR_SUPER_GROSS: "total_csg"})
+    )
 
-with st.spinner("Loading forecast..."):
-    fig_fc = create_forecast_chart(forecast_filtered, forecast_use_first9)
-    if fig_fc:
-        st.plotly_chart(fig_fc, use_container_width=True)
+    if csg_year.empty:
+        st.info("No data for Cari Super Gross with current filters.")
     else:
-        st.info("Not enough historical data to build a forecast.")
+        csg_year = add_growth_by_year(csg_year, "total_csg")
+        fig_csg = create_bar_with_growth(
+            csg_year,
+            value_col="total_csg",
+            growth_col="total_csg_growth_pct",
+            title="Total Cari Super Gross by year (bank-wide)",
+        )
+        if fig_csg:
+            st.plotly_chart(fig_csg, use_container_width=True)
+        else:
+            st.info("No data for Cari Super Gross with current filters.")
 
 st.markdown(
-    "_Qeyd: Forecast qrafikində Total payment üzrə tarixi trendə əsaslanaraq gələcək illər üçün proqnoz qurulur. "
-    "Əgər aşağıdakı checkbox aktivdirsə, hər il üçün yalnız ilk 9 ayın (Yanvar–Sentyabr) cəmi nəzərə alınır və "
-    "2026–2027-ci illər üçün eyni tempdə artım davam edəcəyi fərz olunur. Checkbox söndürülüdürsə, 2025-ci ilin son "
-    "3 ayı əvvəlki illərin Q4/ilk 9 ay nisbətlərinə əsasən təxmini hesablanır və 2026–2027-ci illər üzrə tam illik "
-    "proqnoz göstərilir. Qrafikdə tarixi və proqnoz xətləri fərqli cizgi üslubu ilə ayrılır, hər nöqtənin yanında isə "
-    "illik məbləğ və əvvəlki ilə nisbətən artım/faiz dəyişikliyi qeyd olunur. Forecast yalnız il, group, departament, "
-    "filial və vəzifə filtrlərinə uyğun olaraq hesablanır, year filterindən asılı deyil ki, trendi itirməyəsiniz._"
+    "_Bu qrafik bank üzrə Cari Super Gross məbləğini illər üzrə göstərir. Cari Super Gross – əməkdaşlara ödənilən "
+    "Total payment-lə yanaşı, bank tərəfindən həmin məbləğlər üzrə ödənilən vergiləri də əhatə edən ümumi xərcdir. "
+    "Sütunun üstündə hər il üçün ümumi Cari Super Gross, içində isə əvvəlki ilə nisbətən artım/faiz və məbləğ fərqi "
+    "görünür. Filterlər tətbiq olunduqda qrafik yalnız seçilmiş kəsim üzrə ümumi Cari Super Gross-u göstərir._"
 )
